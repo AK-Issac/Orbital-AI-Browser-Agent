@@ -39,6 +39,41 @@ app.post('/api/plan', async (req, res) => {
   }
 });
 
+import { getAiPlanStream } from './aiService';
+
+app.post('/api/plan/stream', async (req, res) => {
+  const { prompt, domHtml, history, pageContext, persona, vaultFile } = req.body;
+
+  if (!prompt || !domHtml) {
+    res.status(400).json({ error: "Missing 'prompt' or 'domHtml' in request body." });
+    return;
+  }
+
+  // Set headers for JSONL
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const abortController = new AbortController();
+
+  req.on('close', () => {
+    console.log("Client disconnected, aborting OpenAI request...");
+    abortController.abort();
+  });
+
+  try {
+    await getAiPlanStream(prompt, domHtml, history || [], pageContext, persona, vaultFile, res, abortController.signal);
+  } catch (error: any) {
+    if (error.name === 'AbortError') {
+      console.log('Stream aborted successfully.');
+    } else {
+      console.error("Error streaming AI plan:", error.message);
+      res.write(`event: error\ndata: ${JSON.stringify(error.message)}\n\n`);
+      res.end();
+    }
+  }
+});
+
 // Start the server
 app.listen(port, () => {
   console.log(`🚀 Server is running on http://localhost:${port}`);

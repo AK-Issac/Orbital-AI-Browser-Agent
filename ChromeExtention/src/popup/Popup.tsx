@@ -26,6 +26,11 @@ function Popup() {
   const [persona, setPersona]         = useState("");
   const [cvName, setCvName]           = useState<string | null>(null);
 
+  // Streaming & Token State
+  const [totalTokens, setTotalTokens] = useState(0);
+  const portRef = useRef<chrome.runtime.Port | null>(null);
+  const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const scrollRef         = useRef<HTMLDivElement>(null);
   const shouldStopRef     = useRef(false);
   const confirmResolveRef = useRef<((approved: boolean) => void) | null>(null);
@@ -87,6 +92,15 @@ function Popup() {
     confirmResolveRef.current?.(false);
     confirmResolveRef.current = null;
     setPendingPlan(null);
+
+    if (portRef.current) {
+      portRef.current.postMessage({ action: "STOP" });
+      portRef.current.disconnect();
+      portRef.current = null;
+    }
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+    }
   };
 
   const awaitConfirmation = (plan: PendingPlan): Promise<boolean> =>
@@ -178,11 +192,60 @@ function Popup() {
       if (shouldStopRef.current) { addLog("STOPPED.", 'warn'); break; }
       addLog("Consulting AI...", 'system');
 
+      let currentThought = "";
+      addLog("AI is thinking...", 'thought');
+
       const aiRes = await new Promise<any>((resolve) => {
-        chrome.runtime.sendMessage(
-          { action: "PLAN_ACTIONS", payload: { prompt, domHtml, history: localHistory, pageContext, persona, vaultFile: cvName } },
-          (res) => resolve(res)
-        );
+        const port = chrome.runtime.connect({ name: "plan-stream" });
+        portRef.current = port;
+
+        // Periodic heartbeat to keep service worker alive during long generation
+        pingIntervalRef.current = setInterval(() => {
+          port.postMessage({ action: "PING" });
+        }, 10000);
+
+        let finalPlan: any = null;
+
+        port.onMessage.addListener((msg) => {
+          if (msg.type === "thought") {
+            currentThought += msg.data;
+            setLogs(prev => {
+              const next = [...prev];
+              const lastIdx = next.length - 1;
+              if (lastIdx >= 0 && next[lastIdx].type === 'thought') {
+                next[lastIdx] = { ...next[lastIdx], message: "AI: " + currentThought };
+              }
+              return next;
+            });
+            requestAnimationFrame(() => {
+              if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            });
+          } else if (msg.type === "usage") {
+            if (msg.data.total_tokens) {
+              setTotalTokens(prev => prev + msg.data.total_tokens);
+            }
+          } else if (msg.type === "plan") {
+            finalPlan = msg.data;
+          } else if (msg.type === "error") {
+            resolve({ status: "error", message: msg.data });
+            port.disconnect();
+          } else if (msg.type === "done") {
+            resolve({ status: "success", plan: finalPlan });
+            port.disconnect();
+          }
+        });
+
+        port.onDisconnect.addListener(() => {
+          if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+          if (!finalPlan && !shouldStopRef.current) {
+            resolve({ status: "error", message: "Port disconnected before plan completed." });
+          }
+        });
+
+        port.postMessage({
+          action: "START_PLAN",
+          payload: { prompt, domHtml, history: localHistory, pageContext, persona, vaultFile: cvName }
+        });
       });
 
       if (!aiRes || aiRes.status !== "success") {
@@ -190,8 +253,7 @@ function Popup() {
         break;
       }
 
-      const { thought, actions, taskCompleted } = aiRes.plan;
-      addLog(`AI: ${thought}`, 'thought');
+      const { actions, taskCompleted } = aiRes.plan;
 
       if (taskCompleted && actions.length === 0) {
         addLog("Goal detected — no further actions needed.", 'success');
@@ -249,12 +311,12 @@ function Popup() {
         } else {
           // Option A: Fast Re-plan if element is missing due to React re-render
           if (result.message.includes("not found")) {
-            addLog(`⚠ Element missing, triggering fast re-plan...`, 'warn');
+            addLog(`⚠ ACTION FAILED: Attempted to ${action.actionType.toUpperCase()} "${action.targetId}" but the element vanished. The page likely re-rendered. The AI will re-evaluate the new DOM.`, 'warn');
             localHistory.push(`[STEP ${stepCount}] Element "${action.targetId}" missing. Page may have re-rendered. Evaluate new DOM.`);
             stepHadFailure = true;
             break;
           } else {
-            addLog(`✗ FAILED: ${result.message}`, 'error');
+            addLog(`✗ ACTION FAILED: Could not ${action.actionType.toUpperCase()} on "${action.targetId}" (${result.message}). The AI will find another approach.`, 'error');
             localHistory.push(`[STEP ${stepCount}] FAILED to ${action.actionType} on "${action.targetId}" — ${result.message}. Try another approach.`);
             stepHadFailure = true;
             break;
@@ -295,6 +357,11 @@ function Popup() {
           <div className="control green"></div>
         </div>
         <div className="terminal-title">AI_AGENT_SHELL_V1.0</div>
+        
+        <div className={`token-counter ${totalTokens > 50000 ? 'warning' : ''}`} title="Session Tokens">
+          Tokens: {(totalTokens / 1000).toFixed(1)}k | Cost: ${((totalTokens / 1000000) * 10).toFixed(3)}
+        </div>
+
         {isRunning && (
           <button className="stop-button" onClick={handleStop}>■ STOP</button>
         )}

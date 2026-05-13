@@ -1,43 +1,65 @@
 console.log("Background service worker is running!");
 
-chrome.runtime.onMessage.addListener((
-  request: any,
-  _sender: chrome.runtime.MessageSender,
-  sendResponse: (response?: any) => void
-) => {
-  if (request.action === "PLAN_ACTIONS") {
-    // ── FIX: history and pageContext were silently dropped before ──
-    const { prompt, domHtml, history, pageContext, persona, vaultFile } = request.payload;
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === "plan-stream") {
+    let abortController: AbortController | null = null;
 
-    (async () => {
-      try {
-        const plan = await getAiPlan(prompt, domHtml, history ?? [], pageContext, persona, vaultFile);
-        sendResponse({ status: "success", plan });
-      } catch (error: any) {
-        console.error("Error in getAiPlan:", error);
-        sendResponse({ status: "error", message: error.message });
+    port.onMessage.addListener(async (msg) => {
+      // Heartbeat ping from popup to keep service worker alive
+      if (msg.action === "PING") {
+        return; 
       }
-    })();
 
-    return true;
+      if (msg.action === "STOP") {
+        if (abortController) abortController.abort();
+        return;
+      }
+
+      if (msg.action === "START_PLAN") {
+        abortController = new AbortController();
+        try {
+          const response = await fetch("http://localhost:3000/api/plan/stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(msg.payload),
+            signal: abortController.signal
+          });
+
+          if (!response.body) throw new Error("No response body");
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder("utf-8");
+          let buffer = "";
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            let newlineIdx;
+            while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
+              const line = buffer.slice(0, newlineIdx);
+              buffer = buffer.slice(newlineIdx + 1);
+              if (line.trim()) {
+                port.postMessage(JSON.parse(line));
+              }
+            }
+          }
+          // Signal stream complete
+          port.postMessage({ type: "done" });
+        } catch (error: any) {
+          if (error.name === 'AbortError') {
+            port.postMessage({ type: "error", data: "Stream aborted by user." });
+          } else {
+            console.error("Stream error:", error);
+            port.postMessage({ type: "error", data: error.message });
+          }
+        }
+      }
+    });
+
+    port.onDisconnect.addListener(() => {
+      if (abortController) abortController.abort();
+    });
   }
 });
-
-async function getAiPlan(
-  userPrompt: string,
-  domHtml: string,
-  history: string[],
-  pageContext?: { url: string; title: string },
-  persona?: string,
-  vaultFile?: string
-) {
-  const response = await fetch("http://localhost:3000/api/plan", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt: userPrompt, domHtml, history, pageContext, persona, vaultFile })
-  });
-
-  const data = await response.json();
-  if (data.status === "error") throw new Error(data.message);
-  return data.plan;
-}
