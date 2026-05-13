@@ -7,10 +7,12 @@
 [![OpenAI](https://img.shields.io/badge/AI-GPT--4o-412991)](https://openai.com/)
 [![MV3](https://img.shields.io/badge/Extension-Manifest%20V3-4285F4)](https://developer.chrome.com/docs/extensions/mv3/)
 
-Orbital is a Chrome Extension that turns natural language into browser actions. Tell it what you want — it reads the page, reasons about it, and executes. Search, form-fill, CV drops, multi-step workflows. No scripts. No selectors. Just intent.
+**Orbital is a Chrome Extension that turns natural language into browser actions.**
+
+Type what you want. The agent reads the live page, reasons about it, plans a sequence of actions, and executes — click by click, field by field — until the goal is met. No Selenium. No hand-written selectors. No scripting. Natural language workflows powered by semantic DOM understanding and structured browser automation.
 
 ![Demo](./demo.gif)
-*60-second walkthrough: searching Google, filling a multi-field form, and auto-uploading a CV.*
+*60-second walkthrough: searching Google, filling a multi-field form, and auto-uploading a CV to a job application.*
 
 ---
 
@@ -20,19 +22,23 @@ Orbital is a Chrome Extension that turns natural language into browser actions. 
 2. [System Architecture](#system-architecture)
 3. [Architecture & Engineering Decisions](#architecture--engineering-decisions)
 4. [Agent Loop Deep Dive](#agent-loop-deep-dive)
-5. [Cost Optimization Strategy](#cost-optimization-strategy)
-6. [Key Features](#key-features)
-7. [Tech Stack](#tech-stack)
-8. [Local Setup](#local-setup)
+5. [Reliability & Benchmarks](#reliability--benchmarks)
+6. [Cost Optimization Strategy](#cost-optimization-strategy)
+7. [Known Limitations](#known-limitations)
+8. [Key Features](#key-features)
+9. [Tech Stack](#tech-stack)
+10. [Local Setup](#local-setup)
+11. [Project Structure](#project-structure)
 
 ---
 
 ## How It Works
 
-1. User types a goal in natural language: *"Find me a chicken curry recipe"*
-2. The agent scans the live DOM, stripping it into a compact, semantically meaningful HTML snapshot
-3. GPT-4o reasons about the page and returns a typed action plan (click, type, upload)
-4. The agent executes each action, watches for DOM mutations and URL changes, and loops until the goal is met
+1. **Intent** — User types a goal: *"Find me a chicken curry recipe"* or *"Fill out this job application with my info"*
+2. **Scan** — The content script recursively walks the live DOM, compressing a 400KB page into a ~26KB semantically meaningful HTML snapshot
+3. **Reason** — GPT-4o receives the snapshot, page context, and action history. It streams back a structured plan: `{ thought, actions[], taskCompleted }`
+4. **Execute** — Each action (`click`, `type`, `upload`) is dispatched to the content script, which waits for DOM mutations or URL changes to confirm success
+5. **Loop** — The agent re-evaluates after each step, adapts to failures, and terminates only when the goal is provably met
 
 ---
 
@@ -41,99 +47,114 @@ Orbital is a Chrome Extension that turns natural language into browser actions. 
 ![Architecture](./Architecture.png)
 
 **Data flow per agent step:**
-`Popup → GET_PAGE_CONTEXT → QuickCheck API → (if needed) SCAN_PAGE → Stream Plan API → EXECUTE_ACTION → repeat`
+
+```
+Popup → GET_PAGE_CONTEXT → QuickCheck API → (if needed) SCAN_PAGE → Stream Plan API → EXECUTE_ACTION → repeat
+```
 
 ---
 
 ## Architecture & Engineering Decisions
 
-### DOM Representation: Simplified HTML over Raw HTML
+### 1. DOM Representation: Surgical HTML Reduction
 
-Raw page HTML is unworkable at scale — a typical Google search results page is 400-800KB. Sending that verbatim would cost ~$0.80 per step and likely exceed context limits.
+Raw page HTML is unworkable — a typical Google search results page is 400–800KB. Sending it verbatim would cost ~$0.80 per step and overflow most context windows.
 
-Instead, `buildSimplifiedHtml()` in the content script produces a surgical reduction:
+`buildSimplifiedHtml()` in the content script produces a precise, agent-readable reduction:
 
-- **Strips all noise**: `script`, `style`, `svg`, `iframe`, `img`, `video`, `noscript`, `meta`, `link` tags are excluded
-- **Visibility enforcement**: `getComputedStyle()` is called on every element — hidden containers (`display: none`, `visibility: hidden`, `opacity: 0`) are excluded recursively, not just at leaf level. This prevents invisible modals and off-screen menus from polluting the context
-- **Interactive element tagging**: Every `button`, `input`, `a`, `select`, `textarea`, `role="button"`, and `role="link"` element receives a deterministic `data-agent-id` attribute (`agent-0`, `agent-1`, ...) and a visible magenta outline
-- **Text truncation**: Text nodes longer than 100 characters are truncated unless inside a `button`, `a`, `label`, `option`, or heading tag. Recipe pages, article bodies, and documentation become dramatically smaller
-- **Shadow DOM traversal**: The scanner walks `el.shadowRoot` for every element, enabling compatibility with YouTube, Google's Material components, and other modern web apps that isolate UI in shadow trees
-- **Agent ID cleanup**: On every scan cycle, all previous `data-agent-id` attributes are stripped before reassignment. Without this, step 2+ would target wrong elements — a silent correctness bug
+- **Noise elimination**: `script`, `style`, `svg`, `iframe`, `img`, `video`, `noscript`, `meta`, and `link` tags are stripped entirely
+- **Recursive visibility enforcement**: `getComputedStyle()` is called on every element — `display: none`, `visibility: hidden`, and `opacity: 0` containers are excluded at the parent level, not just at leaf nodes. Hidden modals, off-screen menus, and collapsed dropdowns never reach the model
+- **Interactive element tagging**: Every `button`, `input`, `a`, `select`, `textarea`, `role="button"`, and `role="link"` receives a deterministic `data-agent-id` (`agent-0`, `agent-1`, ...) and a visible magenta outline on the live page, giving the AI a stable targeting reference
+- **Text truncation**: Text nodes longer than 100 characters are truncated unless inside interactive labels, buttons, or headings. Recipe pages, article bodies, and documentation shrink dramatically without losing navigational context
+- **Shadow DOM traversal**: The scanner walks `el.shadowRoot` recursively, enabling compatibility with YouTube, Google's Material components, and other modern apps that isolate UI in shadow trees — where standard DOM scrapers fail silently
+- **Agent ID cleanup**: Every scan cycle strips all previous `data-agent-id` attributes before reassignment. Without this, step 2+ would target stale elements from the previous scan — a silent correctness bug that causes the agent to act on the wrong element
 
-Result: A 400KB Google results page becomes a ~26KB agent-readable snapshot. A recipe page goes from 800KB to ~38KB.
+**Result**: A 400KB Google results page compresses to ~26KB. A recipe page: 800KB → ~38KB.
 
-### Two-Phase Goal Detection (Cost Optimization)
+---
 
-Every agent step begins with a **lightweight context check** before committing to a full DOM scan and expensive GPT-4o call:
+### 2. Two-Phase Goal Detection
 
-1. `GET_PAGE_CONTEXT` — synchronous message to content script, returns URL + title. Zero cost
-2. `POST /api/quickcheck` — sends only the URL, title, goal, and history to `gpt-4o-mini`. ~200 tokens, ~$0.0001
-3. If `goalMet: true` → skip DOM scan entirely, mark task complete
-4. If `goalMet: false` → proceed to full scan + GPT-4o reasoning
+Scanning a full DOM and calling GPT-4o to confirm "yes, you're already on the right page" wastes time and money. Orbital uses a tiered detection strategy before committing to an expensive call:
 
-On a 3-step task like "find me a chicken curry recipe", this eliminates the final step's full 38,237-char DOM scan entirely. The model can determine completion from the page title alone.
+| Phase | Action | Cost |
+|---|---|---|
+| `GET_PAGE_CONTEXT` | Synchronous message → URL + title | Free |
+| `POST /api/quickcheck` | URL + title + goal → `gpt-4o-mini` | ~$0.0001 |
+| `POST /api/plan/stream` | Full DOM + history → `gpt-4o` | ~$0.04–0.08 |
 
-**Why `gpt-4o-mini` for quickcheck?** The decision is binary — yes or no. `gpt-4o-mini` is 20x cheaper per token than `gpt-4o` and produces identical accuracy on simple classification tasks. Routing correctly by task complexity is the most impactful cost lever in agentic systems.
+If the page title alone satisfies the goal (e.g., landing on *"Indian Chicken Curry Recipe"*), the agent terminates without ever running the full scan. The `gpt-4o-mini` quickcheck costs 20x less than `gpt-4o` and achieves identical accuracy on binary classification — routing by task complexity is the most impactful cost lever in agentic systems.
 
-### Streaming Architecture: Popup → SSE → OpenAI
+---
 
-The agent uses **Server-Sent Events (SSE)** for real-time thought streaming, with the popup connecting directly to the Express backend — bypassing the Chrome service worker entirely.
+### 3. Streaming Architecture: Direct Popup → SSE → OpenAI
 
-**Why not route through the service worker?** Chrome Manifest V3 service workers are designed for short-lived event processing, not long-held HTTP connections. A streaming fetch inside a service worker's `onMessage` handler will be killed mid-stream as the worker goes dormant — even with an active port connection. The `req.on('close')` event fires immediately when the POST body is consumed (not when the SSE client disconnects), causing an AbortController abort before OpenAI even responds.
+The agent streams GPT-4o's reasoning in real time using **Server-Sent Events (SSE)**. The popup connects directly to the Express backend — intentionally bypassing the Chrome service worker.
 
-The fix: popup fetches directly to `localhost:3000`. The popup is a real browser window with no lifetime constraints. The service worker is retained only for `chrome.tabs.sendMessage` calls (DOM scan, action execution), where short-lived handlers are appropriate.
+**The MV3 problem**: Chrome Manifest V3 service workers are designed for short-lived event handlers, not long-held HTTP connections. A streaming `fetch` inside an `onMessage` async handler gets killed mid-stream as the worker goes dormant. Critically, `req.on('close')` on the Node side fires the moment the POST body is consumed — not when the SSE client actually disconnects — causing the `AbortController` to abort the OpenAI request before any tokens stream back.
+
+**The fix**: The popup is a real browser window with no lifetime constraints. It fetches directly to `localhost:3000`, holds the SSE connection open, and reads chunks via a streaming `ReadableStream` reader. The service worker is retained only for `chrome.tabs.sendMessage` calls, where short-lived handlers are the correct model.
 
 **SSE event protocol:**
 ```
-data: { type: "thought", data: "I can see a search bar..." }  // streams incrementally
-data: { type: "usage",   data: { prompt_tokens: 8420, completion_tokens: 180, total_tokens: 8600 } }
+data: { type: "thought", data: "I can see a search bar on this page..." }
+data: { type: "usage",   data: { prompt_tokens: 8420, completion_tokens: 180 } }
 data: { type: "plan",    data: { thought, taskCompleted, actions[] } }
-data: { type: "error",   data: "..." }
+data: { type: "error",   data: "Failed to parse AI plan." }
 ```
 
-Thought extraction uses an incremental regex (`/"thought"\s*:\s*"((?:[^"\\]|\\.)*)/`) that correctly handles JSON escape sequences mid-stream, allowing character-by-character display of the AI's reasoning without waiting for the full response.
+Thought tokens stream character-by-character using an incremental regex (`/"thought"\s*:\s*"((?:[^"\\]|\\.)*)/`) that correctly handles mid-stream JSON escape sequences — the user watches the AI reason in real time rather than waiting 5–8 seconds for a silent black-box response.
 
-### Page Stability Detection
+---
 
-After every click action, the agent needs to know when to proceed — too early and the DOM is mid-render; too late and it wastes time. Hardcoded sleeps are unreliable across site speeds.
+### 4. Page Stability Detection
+
+After every click, the agent must know when the page has settled before scanning again. Hardcoded `setTimeout` sleeps are unreliable — fast sites trip them early, slow sites waste time.
 
 `waitForPageStable()` implements a two-layer check:
 
-1. **`document.readyState` gate**: waits for `'complete'` before starting mutation tracking. Prevents false positives on in-progress page loads
-2. **Mutation idle detection**: a `MutationObserver` watches the full DOM tree. Any mutation resets a 500ms debounce timer. When 500ms passes with no further mutations, the page is considered stable
-3. **Hard ceiling**: a configurable `timeoutMs` (default 5000ms) guarantees forward progress even on continuously-animated pages (news tickers, live feeds)
+1. **`document.readyState` gate**: blocks until `'complete'`, preventing false positives during active page loads
+2. **Mutation idle debounce**: a `MutationObserver` watches the full DOM subtree. Any mutation resets a 500ms debounce timer. Stability is declared after 500ms of silence
+3. **Hard ceiling**: a configurable `timeoutMs` (default 5000ms) guarantees forward progress on continuously-animated pages
 
-This approach correctly handles SPAs (React, Vue, Angular) where URL changes and DOM mutations are decoupled from `readyState` changes.
+This correctly handles SPAs (React, Vue, Angular) where URL changes and DOM mutations are fully decoupled from `readyState` transitions.
 
-### Action Execution
+---
 
-Three action types are supported:
+### 5. Action Execution
 
-**`click`**: Calls `.click()` on the targeted element, then waits for either a DOM mutation or URL change via `waitForDomMutation()`. If neither occurs within 3 seconds, the action is logged as a dead click and the AI is informed to try another approach.
+Three action primitives form the entire action space:
 
-**`type`**: For standard inputs and textareas, sets `.value` and dispatches synthetic `input` and `change` events with `bubbles: true` — required for React/Vue controlled inputs that listen to React's synthetic event system, not native DOM events. For `<select>` elements, iterates options matching by both `.value` and `.text` to handle cases where option values are opaque IDs.
+**`click`** — Calls `.click()` on the targeted element, then monitors for DOM mutation or URL change via `waitForDomMutation(3000)`. A dead click (no page reaction within 3 seconds) is logged with context and fed back to the AI as a failure signal, prompting a new approach on the next step.
 
-**`upload`**: Retrieves the stored CV from `chrome.storage.local` (stored as base64 on the settings page), reconstructs a `File` object, and injects it into a file input via the `DataTransfer` hack — the only reliable method for programmatically setting file input values, since `<input type="file">` blocks direct `.value` assignment for security reasons.
+**`type`** — Sets `.value` and dispatches synthetic `input` and `change` events with `bubbles: true`. This is required for React and Vue controlled components, which ignore native DOM value changes and only respond to React's synthetic event system. For `<select>` elements, options are matched against both `.value` and `.text.trim()`, handling cases where option values are opaque internal IDs.
 
-### Prompt Engineering: System Prompt Architecture
+**`upload`** — Retrieves the stored file from `chrome.storage.local` (saved as base64 in the Settings vault), reconstructs a typed `File` object, and injects it via the `DataTransfer` hack. Browsers block direct `.value` assignment on `<input type="file">` as a security measure — the `DataTransfer` object is the only reliable programmatic bypass.
 
-The system prompt is built by `buildSystemPrompt()` and has four sections:
+---
 
-- **GOAL DETECTION**: Instructs the model to check URL + title before planning any action. This prevents the agent from clicking into a page it's already on
-- **ANTI-LOOP & FORM RULES**: Guards against the most common failure modes: repeated clicking of the same element, re-filling already-correct form fields, misreading dropdown IDs vs text labels, and scatter-shot form filling (fills field 1, 2, 3 sequentially without reading labels)
-- **STATE MACHINE**: Defines explicit completion criteria for the most common task types (search, video, form). Prevents false-positive task completion ("I searched, therefore I'm done") and false-negative loops ("I'm on a recipe page but should I keep clicking?")
-- **PERSONA ENGINE + FILE VAULT** (conditional): Injected only when persona/CV data is present, keeping the base prompt lean for simple tasks
+### 6. Prompt Engineering Architecture
 
-### History Management
+The system prompt is assembled dynamically by `buildSystemPrompt()` with four layered sections:
 
-The agent maintains a rolling `localHistory` string array — a structured log of what happened at each step, from the AI's perspective:
+- **GOAL DETECTION**: Forces the model to evaluate URL + title before planning any action. Prevents redundant clicks on pages where the goal is already met
+- **ANTI-LOOP & FORM RULES**: Encodes hard-won failure modes — re-filling already-correct fields, blind sequential form filling, misreading `<select>` option IDs, repeating dead clicks, and ignoring navigation history
+- **STATE MACHINE**: Defines explicit, unambiguous completion criteria per task type. Prevents false-positive completion (*"I searched — done"*) and false-negative loops (*"I'm on the recipe page, should I keep clicking?"*)
+- **PERSONA ENGINE + FILE VAULT** (conditional): Appended only when data is present, keeping the base prompt lean for tasks that don't require personal data
+
+---
+
+### 7. History Management & Context Window Safety
+
+The agent maintains a rolling `localHistory` array — a structured log of what the AI decided and what actually happened:
 
 ```
-[STEP 2] CLICKED "agent-20". SUCCESS: The page URL changed. Assess the new page.
-[STEP 2 THOUGHT]: I see search results for chicken curry. I'll click the first recipe link.
+[STEP 2] CLICKED "agent-20". SUCCESS: Page URL changed. Assess new page.
+[STEP 2 THOUGHT]: Search results visible. I'll click the first recipe link.
+[STEP 3] Element "agent-14" missing. Page may have re-rendered. Evaluate new DOM.
 ```
 
-This gives GPT-4o the context it needs to avoid loops, recognize new pages, and understand why previous actions succeeded or failed. History is capped at 10 entries with a `shift()` rolling window — older entries are discarded to prevent context overflow on long sessions.
+History is capped at 10 entries via a `shift()` rolling window. Older entries are discarded to prevent context overflow — a silent failure mode where accumulated history eventually exceeds the model's context window, causing hallucinations or degraded planning.
 
 ---
 
@@ -142,33 +163,57 @@ This gives GPT-4o the context it needs to avoid loops, recognize new pages, and 
 ```
 runAgent()
   │
-  ├── GET_PAGE_CONTEXT (free — no AI)
+  ├── GET_PAGE_CONTEXT (free — no AI call)
   │
-  ├── /api/quickcheck (gpt-4o-mini, ~200 tokens)
-  │     ├── goalMet: true  → MISSION ACCOMPLISHED ✓
+  ├── POST /api/quickcheck (gpt-4o-mini, ~200 tokens, ~$0.0001)
+  │     ├── goalMet: true  ──────────────────────► MISSION ACCOMPLISHED ✓
   │     └── goalMet: false → continue
   │
-  ├── SCAN_PAGE (content script, CPU only)
+  ├── SCAN_PAGE (content script, CPU only — no API call)
   │
-  ├── /api/plan/stream (gpt-4o, SSE)
-  │     ├── streams thought → displayed in real-time
-  │     ├── emits usage    → token/cost counter updated
-  │     └── emits plan     → { thought, taskCompleted, actions[] }
+  ├── POST /api/plan/stream (gpt-4o, SSE)
+  │     ├── streams thought tokens  → displayed character-by-character
+  │     ├── emits usage event       → token + cost counter updated live
+  │     └── emits plan event        → { thought, taskCompleted, actions[] }
   │
-  ├── [SEMI-AUTO] awaitConfirmation() — user approves/rejects
+  ├── [SEMI-AUTO MODE] awaitConfirmation()
+  │     ├── approved → continue
+  │     └── rejected → halt
   │
-  ├── for each action:
+  ├── for each action in plan.actions:
   │     ├── EXECUTE_ACTION → content script
-  │     │     ├── click   → waitForDomMutation(3000)
-  │     │     ├── type    → set value + dispatch events
-  │     │     └── upload  → DataTransfer hack
+  │     │     ├── click   → waitForDomMutation(3000ms)
+  │     │     ├── type    → set .value + dispatch bubbling events
+  │     │     └── upload  → DataTransfer + File reconstruction
   │     │
-  │     ├── success → push to history, waitForPageStable()
-  │     └── failure → contextual error log, push to history, break
+  │     ├── success (URL changed)   → history entry, waitForPageStable(5000ms)
+  │     ├── success (DOM mutated)   → history entry, waitForPageStable(3000ms)
+  │     ├── dead click              → warning, history entry, break
+  │     └── element not found      → contextual warning, history entry, break
   │
-  ├── cap history at 10 entries
-  └── loop (max 15 steps)
+  ├── trim history to 10 entries (rolling window)
+  └── loop — max 15 steps
 ```
+
+---
+
+## Reliability & Benchmarks
+
+> Tested manually across common workflow types on real websites. Results reflect actual agent behavior including retries and failure recovery.
+
+| Workflow Type | Tested | Succeeded | Success Rate |
+|---|---|---|---|
+| Google search + open result | — | — | —% |
+| Multi-field form fill (with persona) | — | — | —% |
+| CV upload to job application | — | — | —% |
+| YouTube search + play video | — | — | —% |
+| E-commerce search + open product | — | — | —% |
+
+**Average steps per completed task:** —
+
+**Average cost per completed task:** —
+
+> *Benchmarks collected manually across real websites. Results vary with page complexity, DOM structure, and site-specific rendering behavior.*
 
 ---
 
@@ -176,32 +221,45 @@ runAgent()
 
 | Optimization | Mechanism | Impact |
 |---|---|---|
-| Quick context check | `gpt-4o-mini` on URL+title only | Eliminates full scan on obvious completions |
-| DOM text truncation | 100-char limit on non-interactive text nodes | ~40-60% DOM size reduction on content pages |
-| Hidden element pruning | `getComputedStyle()` recursive filter | Eliminates hidden modal/dropdown noise |
-| Rolling history window | `shift()` after 10 entries | Prevents context overflow on long sessions |
-| Accurate cost tracking | Separate input/output token pricing ($5/$15 per 1M) | Correct cost display vs blended-rate overestimation |
+| Tiered model routing | `gpt-4o-mini` for binary goal classification | 20x cost reduction on completion checks |
+| DOM text truncation | 100-char limit on non-interactive text nodes | ~40–60% input token reduction on content pages |
+| Recursive visibility pruning | `getComputedStyle()` container-level filter | Eliminates hidden element noise before tokenization |
+| Rolling history window | `shift()` at 10 entries | Prevents context overflow in long sessions |
+| Accurate cost metering | Separate input/output pricing ($5 / $15 per 1M tokens) | Correct display vs. blended-rate overestimation |
 
-**Typical costs per task type:**
-- Simple search/navigation: $0.05 - $0.10
-- Multi-field form fill: $0.08 - $0.15
-- CV drop (navigate + upload): $0.10 - $0.20
+**Observed costs per task type:**
+- Simple search + navigation: ~$0.05–0.10
+- Multi-field form fill: ~$0.08–0.15
+- CV drop (navigate + upload): ~$0.10–0.20
+
+---
+
+## Known Limitations
+
+Orbital is designed for reliability on structured, predictable workflows — not unrestricted open-ended browsing. Understanding where it performs well matters as much as understanding what it can do.
+
+- **Canvas and WebGL interfaces**: Pages that render primarily via `<canvas>` (Figma, Google Maps, some dashboards) have no accessible DOM tree. The agent cannot target elements that don't exist in HTML
+- **Heavy React re-renders**: Aggressive client-side re-renders can invalidate `data-agent-id` assignments mid-step. The agent detects and recovers from missing elements, but SPAs with rapid state mutations may require multiple retries
+- **Authentication walls**: The agent operates on visible page state only. OAuth flows, CAPTCHAs, and 2FA checkpoints require manual user intervention at the blocked step
+- **Ambiguous goals**: Vague instructions (*"do something useful here"*) produce unpredictable results. The agent performs best when the goal is specific and has a clear, verifiable completion state
+- **Continuously animated pages**: Live feeds and auto-refreshing dashboards may interfere with the 500ms mutation idle detector in `waitForPageStable()`, causing premature or delayed step transitions
+- **Long sessions on content-heavy pages**: DOM snapshots near the 80k character limit accumulate significant token cost. Sessions exceeding ~10 steps on large pages may see increased cost and gradually degraded reasoning
 
 ---
 
 ## Key Features
 
-**Semi-Auto & Full-Auto modes** — Semi-Auto pauses before each action batch, displaying the AI's reasoning and planned actions for user review. Full-Auto executes without interruption. Useful for debugging new task types or running on sensitive pages.
+**Semi-Auto & Full-Auto Modes** — Semi-Auto pauses before every action batch, showing the AI's full reasoning and planned actions for user review and approval. Full-Auto executes without interruption. Semi-Auto is the recommended mode for new workflows or sensitive pages.
 
-**Real-time thought streaming** — The AI's reasoning appears character-by-character as it generates, using SSE and incremental JSON regex extraction. The user sees *why* the agent is doing what it's doing, making the system transparent rather than a black box.
+**Real-Time Thought Streaming** — The AI's reasoning streams character-by-character as tokens generate. The user sees *why* each decision is made — transparency over black-box execution. Built on SSE with incremental JSON extraction.
 
-**Persona Engine** — Store name, email, LinkedIn, phone, address and any other personal data in the Settings tab. When the agent encounters a form, it maps persona fields to the correct inputs using HTML context and label analysis — not sequential filling.
+**Persona Engine** — Store personal data (name, email, phone, LinkedIn, address) once in the Settings tab. When the agent encounters any form, it maps fields intelligently using surrounding HTML context and label analysis — not blind sequential filling.
 
-**File Vault** — Upload a CV/resume (PDF/DOC, max 10MB) once. It's stored as base64 in `chrome.storage.local`. When the agent encounters a file upload input, it reconstructs the file and injects it programmatically.
+**File Vault** — Upload a CV or document once (PDF/DOC, max 10MB), stored locally as base64 in `chrome.storage.local`. On any file upload input, the agent reconstructs and injects the file programmatically.
 
-**Session Cost Counter** — Live token usage and dollar cost displayed in the header, calculated with separate input ($5/1M) and output ($15/1M) pricing. Color-shifts to a warning state at 50k tokens.
+**Session Cost Counter** — Live token count and dollar cost in the header, updated per-step with separate input ($5/1M) and output ($15/1M) pricing. Shifts to a warning state at 50k tokens.
 
-**Graceful STOP** — `AbortController` propagates through the fetch chain from popup to Express to OpenAI. Stopping mid-stream cleanly cancels the API request and terminates the SSE connection without leaving the backend hanging.
+**Graceful Cancellation** — `AbortController` propagates from popup fetch → Express `res.on('close')` → OpenAI streaming request. STOP cleanly cancels the entire chain with no dangling connections or background token spend.
 
 ---
 
@@ -209,56 +267,56 @@ runAgent()
 
 | Category | Technology |
 |---|---|
-| **Extension** | Chrome MV3, TypeScript |
+| **Chrome Extension** | Manifest V3, TypeScript |
 | **Frontend** | React, Vite, CSS |
 | **Backend** | Node.js, Express, TypeScript |
-| **AI** | OpenAI GPT-4o (planning), GPT-4o-mini (goal check) |
-| **Streaming** | Server-Sent Events (SSE) |
-| **Storage** | chrome.storage.local (persona + CV vault) |
+| **AI — Planning** | OpenAI GPT-4o (streaming, structured JSON output) |
+| **AI — Goal Check** | OpenAI GPT-4o-mini (sync, binary classification) |
+| **Streaming Protocol** | Server-Sent Events (SSE) |
+| **Local Storage** | chrome.storage.local (persona + CV vault) |
 
 ---
 
 ## Local Setup
 
-**Prerequisites:** Node.js 18+, OpenAI API Key, Chrome browser
+**Prerequisites:** Node.js 18+, OpenAI API key, Chrome
 
-**1. Clone the repo**
+**1. Clone the repository**
 ```bash
 git clone https://github.com/your-username/orbital-agent
 cd orbital-agent
 ```
 
-**2. Configure the backend**
+**2. Start the backend**
 ```bash
-cd backend
-cp .env.example .env
-# Add your key:
-# OPENAI_API_KEY=sk-...
+cd ChromeExtention_Backend
 npm install
+# Create a .env file and add:
+# OPENAI_API_KEY=sk-...
 npm run dev
 ```
-Backend runs on `http://localhost:3000`.
+Server runs on `http://localhost:3000`.
 
 **3. Build the extension**
 ```bash
-cd extension
+cd ChromeExtention
 npm install
 npm run build
 ```
 
 **4. Load in Chrome**
-- Open `chrome://extensions`
-- Enable **Developer Mode** (top right toggle)
+- Go to `chrome://extensions`
+- Enable **Developer Mode** (toggle, top right)
 - Click **Load unpacked**
-- Select the `extension/dist` folder
+- Select the `ChromeExtention/dist` folder
 
-**5. Configure your persona** *(optional but recommended)*
+**5. Set up your persona** *(recommended)*
 
-Click the extension icon → **SETTINGS** tab → fill in your personal data and upload a CV.
+Open Orbital → **SETTINGS** tab → enter personal details → optionally upload a CV.
 
 **6. Run your first mission**
 
-Navigate to any website, open the extension, type a goal, and hit **RUN_MISSION**.
+Navigate to any website, open Orbital, type a goal, and press **RUN_MISSION**.
 
 ---
 
@@ -266,22 +324,25 @@ Navigate to any website, open the extension, type a goal, and hit **RUN_MISSION*
 
 ```
 orbital-agent/
-├── extension/
+│
+├── ChromeExtention/                    # Chrome Extension (React + Vite)
 │   ├── src/
 │   │   ├── popup/
-│   │   │   ├── Popup.tsx          # Agent loop, streaming, UI
+│   │   │   ├── Popup.tsx               # Agent loop, SSE stream reader, UI state
 │   │   │   └── Popup.css
 │   │   ├── content/
-│   │   │   └── content.ts         # DOM scanner, action executor
-│   │   └── background/
-│   │       └── background.ts      # Service worker (minimal relay)
+│   │   │   └── index.ts               # DOM scanner, action executor, stability detection
+│   │   ├── background/
+│   │   │   └── index.ts               # MV3 service worker — lightweight message relay
+│   │   └── types/
+│   │       └── index.ts               # Shared TypeScript interfaces
 │   ├── manifest.json
 │   └── vite.config.ts
 │
-└── backend/
+└── ChromeExtention_Backend/            # Node.js + Express Backend
     ├── src/
-    │   ├── index.ts               # Express routes, SSE setup
-    │   ├── aiService.ts           # GPT-4o streaming, quickcheck
-    │   └── types.ts
-    └── .env.example
+    │   ├── index.ts                    # Express routes, SSE setup, AbortController wiring
+    │   ├── aiService.ts                # GPT-4o streaming, quickcheck, prompt builder
+    │   └── types.ts                    # ActionPlan, DOMElement, Action interfaces
+    └── .env                            # OPENAI_API_KEY
 ```

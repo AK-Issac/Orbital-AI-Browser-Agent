@@ -136,18 +136,24 @@ export async function getAiPlanStream(
   let fullJsonString = "";
   let thoughtStreamedLength = 0;
   
+  let buffer = "";
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
 
-    const chunkStr = decoder.decode(value, { stream: true });
-    const lines = chunkStr.split("\n").filter(line => line.trim() !== "");
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    // Keep the last partial line in the buffer
+    buffer = lines.pop() || "";
 
     for (const line of lines) {
-      if (line === "data: [DONE]") continue;
-      if (line.startsWith("data: ")) {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) continue;
+      if (trimmedLine === "data: [DONE]") continue;
+
+      if (trimmedLine.startsWith("data: ")) {
         try {
-          const data = JSON.parse(line.slice(6));
+          const data = JSON.parse(trimmedLine.slice(6));
           
           if (data.usage) {
             res.write(`data: ${JSON.stringify({ type: "usage", data: data.usage })}\n\n`);
@@ -160,11 +166,9 @@ export async function getAiPlanStream(
             fullJsonString += delta.content;
 
             // Safe incremental JSON thought extraction
-            // We know the schema starts with: {"thought":"
             const match = fullJsonString.match(/"thought"\s*:\s*"((?:[^"\\]|\\.)*)/);
             if (match) {
               const currentThoughtEscaped = match[1];
-              // Unescape to raw string
               let currentThoughtUnescaped = currentThoughtEscaped
                 .replace(/\\n/g, '\n')
                 .replace(/\\"/g, '"')
@@ -175,7 +179,6 @@ export async function getAiPlanStream(
               const deltaThought = currentThoughtUnescaped.slice(thoughtStreamedLength);
               if (deltaThought.length > 0) {
                 thoughtStreamedLength = currentThoughtUnescaped.length;
-                process.stdout.write(deltaThought); // Print to terminal directly so the user can see it!
                 res.write(`data: ${JSON.stringify({ type: "thought", data: deltaThought })}\n\n`);
                 if (typeof (res as any).flush === 'function') {
                   (res as any).flush();
@@ -184,7 +187,9 @@ export async function getAiPlanStream(
             }
           }
         } catch (e) {
-          console.error("Error parsing stream chunk", line);
+          // If we fail to parse, it might be a truly malformed line, but with the buffer logic
+          // this should be extremely rare now.
+          console.error("Error parsing stream chunk:", trimmedLine.slice(0, 50) + "...");
         }
       }
     }
