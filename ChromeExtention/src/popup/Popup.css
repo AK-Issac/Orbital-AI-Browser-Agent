@@ -1,0 +1,430 @@
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500&display=swap');
+
+:root {
+  --terminal-bg: #0d0d0d;
+  --terminal-header: #1a1a1a;
+  --terminal-green: #00ff41;
+  --terminal-green-dim: #008f11;
+  --terminal-border: #333;
+  --terminal-font: 'Fira Code', monospace;
+  --terminal-warn: #ffbd2e;
+  --terminal-red: #ff3e3e;
+  --terminal-blue: #00d2ff;
+}
+
+body { margin: 0; padding: 0; background-color: transparent; }
+
+/* ─────────────────────────────────────────────
+   Container
+───────────────────────────────────────────── */
+.terminal-container {
+  width: 420px;
+  background-color: var(--terminal-bg);
+  color: var(--terminal-green);
+  font-family: var(--terminal-font);
+  border: 1px solid var(--terminal-border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0,0,0,.5);
+  position: relative;
+}
+
+/* CRT scanline */
+.terminal-container::before {
+  content: " ";
+  display: block;
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(rgba(18,16,16,0) 50%, rgba(0,0,0,.1) 50%),
+    linear-gradient(90deg, rgba(255,0,0,.03), rgba(0,255,0,.01), rgba(0,0,255,.03));
+  z-index: 10;
+  background-size: 100% 3px, 3px 100%;
+  pointer-events: none;
+}
+
+/* ─────────────────────────────────────────────
+   Header
+───────────────────────────────────────────── */
+.terminal-header {
+  background-color: var(--terminal-header);
+  padding: 10px 15px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--terminal-border);
+  gap: 10px;
+}
+
+.window-controls { display: flex; gap: 6px; margin-right: 5px; }
+.control         { width: 10px; height: 10px; border-radius: 50%; }
+.red    { background-color: #ff5f56; }
+.yellow { background-color: #ffbd2e; }
+.green  { background-color: #27c93f; }
+
+.terminal-title {
+  font-size: 11px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 500;
+  flex: 1;
+}
+
+.stop-button {
+  margin-left: auto;
+  padding: 3px 10px;
+  background: transparent;
+  border: 1px solid var(--terminal-red);
+  color: var(--terminal-red);
+  font-family: var(--terminal-font);
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all .15s ease;
+  white-space: nowrap;
+}
+.stop-button:hover {
+  background: var(--terminal-red);
+  color: #000;
+  box-shadow: 0 0 10px rgba(255,62,62,.5);
+}
+
+/* ─────────────────────────────────────────────
+   Body
+───────────────────────────────────────────── */
+.terminal-body { padding: 20px; }
+
+.input-section { margin-bottom: 20px; }
+
+.terminal-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--terminal-green-dim);
+}
+
+.terminal-textarea {
+  width: 100%;
+  height: 80px;
+  background: rgba(0,0,0,.3);
+  border: 1px solid var(--terminal-green-dim);
+  border-radius: 4px;
+  color: var(--terminal-green);
+  padding: 10px;
+  font-family: var(--terminal-font);
+  font-size: 13px;
+  resize: none;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color .3s ease, box-shadow .3s ease;
+}
+.terminal-textarea:focus {
+  border-color: var(--terminal-green);
+  box-shadow: 0 0 10px rgba(0,255,65,.2);
+}
+
+/* ─────────────────────────────────────────────
+   Autonomy toggle
+───────────────────────────────────────────── */
+.mode-toggle {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 7px;
+  background: transparent;
+  border: 1px solid #333;
+  color: #555;
+  font-family: var(--terminal-font);
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.mode-btn:hover:not(:disabled) {
+  border-color: var(--terminal-green-dim);
+  color: var(--terminal-green-dim);
+}
+/* Active: SEMI */
+.mode-btn.mode-active {
+  border-color: var(--terminal-green);
+  color: var(--terminal-green);
+  box-shadow: 0 0 8px rgba(0,255,65,.15);
+}
+/* Danger variant (FULL AUTO) */
+.mode-btn-danger:hover:not(:disabled) {
+  border-color: var(--terminal-warn);
+  color: var(--terminal-warn);
+}
+.mode-btn-danger.mode-active-danger {
+  border-color: var(--terminal-warn);
+  color: var(--terminal-warn);
+  box-shadow: 0 0 8px rgba(255,189,46,.2);
+}
+.mode-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ─────────────────────────────────────────────
+   Run button
+───────────────────────────────────────────── */
+.terminal-button {
+  width: 100%;
+  padding: 12px;
+  background: transparent;
+  border: 1px solid var(--terminal-green);
+  color: var(--terminal-green);
+  font-family: var(--terminal-font);
+  font-weight: bold;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all .2s ease;
+  margin-top: 10px;
+}
+.terminal-button:hover:not(:disabled) {
+  background: var(--terminal-green);
+  color: black;
+  box-shadow: 0 0 15px var(--terminal-green);
+}
+.terminal-button:disabled { border-color: #333; color: #333; cursor: not-allowed; }
+
+/* ─────────────────────────────────────────────
+   Confirmation panel (SEMI mode)
+───────────────────────────────────────────── */
+.confirmation-panel {
+  border: 1px solid var(--terminal-warn);
+  border-radius: 4px;
+  padding: 12px;
+  margin-bottom: 16px;
+  background: rgba(255,189,46,.04);
+  animation: panel-in .2s ease;
+}
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+
+.confirmation-header {
+  font-size: 11px;
+  font-weight: bold;
+  color: var(--terminal-warn);
+  letter-spacing: 1px;
+  margin-bottom: 8px;
+}
+
+.confirmation-thought {
+  font-size: 11px;
+  color: var(--terminal-blue);
+  margin-bottom: 10px;
+  line-height: 1.5;
+  opacity: .85;
+}
+
+.confirmation-actions     { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.confirmation-action-row  { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.action-index             { color: #555; }
+.action-type              { color: var(--terminal-warn); font-weight: bold; }
+.action-target            { color: var(--terminal-green-dim); }
+.action-value             { color: var(--terminal-green); opacity: .8; }
+
+.confirmation-buttons { display: flex; gap: 8px; }
+
+.btn-approve, .btn-abort {
+  flex: 1;
+  padding: 8px;
+  font-family: var(--terminal-font);
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.btn-approve {
+  background: transparent;
+  border: 1px solid var(--terminal-green);
+  color: var(--terminal-green);
+}
+.btn-approve:hover {
+  background: var(--terminal-green);
+  color: #000;
+  box-shadow: 0 0 12px rgba(0,255,65,.4);
+}
+.btn-abort {
+  background: transparent;
+  border: 1px solid var(--terminal-red);
+  color: var(--terminal-red);
+}
+.btn-abort:hover {
+  background: var(--terminal-red);
+  color: #000;
+  box-shadow: 0 0 12px rgba(255,62,62,.4);
+}
+
+/* ─────────────────────────────────────────────
+   Console
+───────────────────────────────────────────── */
+.console-output {
+  background: rgba(0,0,0,.5);
+  border: 1px solid #222;
+  border-radius: 4px;
+  padding: 12px;
+  height: 180px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  scrollbar-width: thin;
+  scrollbar-color: var(--terminal-green-dim) transparent;
+}
+.console-output::-webkit-scrollbar       { width: 6px; }
+.console-output::-webkit-scrollbar-thumb { background-color: var(--terminal-green-dim); border-radius: 3px; }
+
+.log-entry         { margin-bottom: 6px; word-break: break-all; }
+.log-entry.system  { color: #888; }
+.log-entry.thought { color: var(--terminal-blue); }
+.log-entry.success { color: var(--terminal-green); font-weight: bold; }
+.log-entry.error   { color: var(--terminal-red); }
+.log-entry.warn    { color: var(--terminal-warn); }
+.log-entry.step    { color: #ffd700; border-top: 1px dashed #333; padding-top: 5px; margin-top: 10px; }
+
+/* ─────────────────────────────────────────────
+   Cursor
+───────────────────────────────────────────── */
+.cursor {
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  background-color: var(--terminal-green);
+  margin-left: 5px;
+  vertical-align: middle;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  from, to { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+/* ─────────────────────────────────────────────
+   Tabs & Settings
+───────────────────────────────────────────── */
+.tab-buttons {
+  display: flex;
+  background-color: var(--terminal-header);
+  border-bottom: 1px solid var(--terminal-border);
+}
+
+.tab-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #666;
+  font-family: var(--terminal-font);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  padding: 8px 0;
+  cursor: pointer;
+  transition: all .2s ease;
+  text-transform: uppercase;
+}
+
+.tab-btn:hover {
+  color: var(--terminal-green);
+  background-color: rgba(0, 255, 65, 0.05);
+}
+
+.tab-btn.active {
+  color: var(--terminal-green);
+  border-bottom: 2px solid var(--terminal-green);
+  background-color: rgba(0, 255, 65, 0.1);
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.persona-textarea {
+  min-height: 120px;
+}
+
+.file-vault-container {
+  display: flex;
+  align-items: center;
+  background: rgba(0,0,0,.3);
+  border: 1px dashed var(--terminal-green-dim);
+  padding: 10px;
+  border-radius: 4px;
+}
+
+.vault-file-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.vault-filename {
+  color: var(--terminal-green);
+  word-break: break-all;
+  margin-right: 10px;
+  font-size: 12px;
+}
+
+.vault-clear-btn {
+  background-color: transparent;
+  color: var(--terminal-red);
+  border: 1px solid var(--terminal-red);
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: var(--terminal-font);
+  font-size: 11px;
+  transition: all .15s ease;
+}
+
+.vault-clear-btn:hover {
+  background-color: var(--terminal-red);
+  color: #000;
+  box-shadow: 0 0 10px rgba(255,62,62,.4);
+}
+
+.vault-file-input {
+  color: var(--terminal-green);
+  font-family: var(--terminal-font);
+  font-size: 11px;
+  width: 100%;
+}
+
+.vault-file-input::file-selector-button {
+  background-color: transparent;
+  color: var(--terminal-green);
+  border: 1px solid var(--terminal-green);
+  padding: 4px 8px;
+  margin-right: 10px;
+  cursor: pointer;
+  font-family: var(--terminal-font);
+  border-radius: 3px;
+  transition: all .15s ease;
+}
+
+.vault-file-input::file-selector-button:hover {
+  background-color: var(--terminal-green);
+  color: #000;
+  box-shadow: 0 0 10px rgba(0,255,65,.4);
+}
+
+.settings-hint {
+  font-size: 10px;
+  color: #666;
+  margin-top: -5px;
+}
