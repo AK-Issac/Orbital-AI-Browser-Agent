@@ -38,40 +38,7 @@ Orbital is a Chrome Extension that turns natural language into browser actions. 
 
 ## System Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│                  Chrome Extension                   │
-│                                                     │
-│  ┌──────────────┐       ┌──────────────────────┐   │
-│  │  Popup (React│       │   Content Script     │   │
-│  │  + Vite)     │◄─────►│   (DOM Scanner +     │   │
-│  │              │       │    Action Executor)  │   │
-│  │  Agent Loop  │       └──────────────────────┘   │
-│  │  SSE Reader  │                                   │
-│  └──────┬───────┘                                   │
-│         │ fetch (SSE)                               │
-└─────────┼───────────────────────────────────────────┘
-          │
-┌─────────▼───────────────────────────────────────────┐
-│              Node / Express Backend                 │
-│                                                     │
-│   POST /api/plan/stream   POST /api/quickcheck     │
-│   (Server-Sent Events)    (goal-met boolean)       │
-│                                                     │
-│   ┌────────────────────────────────────────────┐   │
-│   │              aiService.ts                  │   │
-│   │  buildSystemPrompt()  getAiPlanStream()    │   │
-│   │  getQuickCheck()                           │   │
-│   └────────────────────────────────────────────┘   │
-│                     │                              │
-└─────────────────────┼──────────────────────────────┘
-                      │
-          ┌───────────▼───────────┐
-          │    OpenAI API         │
-          │    GPT-4o (stream)    │
-          │    GPT-4o-mini (QC)   │
-          └───────────────────────┘
-```
+![Architecture](./Architecture.png)
 
 **Data flow per agent step:**
 `Popup → GET_PAGE_CONTEXT → QuickCheck API → (if needed) SCAN_PAGE → Stream Plan API → EXECUTE_ACTION → repeat`

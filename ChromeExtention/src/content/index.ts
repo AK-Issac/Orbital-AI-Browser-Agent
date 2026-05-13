@@ -87,6 +87,17 @@ chrome.runtime.onMessage.addListener((
     return false; // Synchronous
   }
 
+  else if (request.action === "GET_PAGE_CONTEXT") {
+    sendResponse({
+      status: "success",
+      pageContext: {
+        url:   window.location.href,
+        title: document.title,
+      }
+    });
+    return false; // Synchronous
+  }
+
   else if (request.action === "WAIT_FOR_STABLE") {
     waitForPageStable(request.payload?.timeout || 5000).then(() => {
       sendResponse({ status: "success" });
@@ -231,8 +242,17 @@ let agentCounter = 0;
 
 function buildSimplifiedHtml(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) {
-    const text = node.nodeValue?.trim();
-    return text ? text + " " : "";
+    let text = node.nodeValue?.trim();
+    if (!text) return "";
+
+    const parent = node.parentElement;
+    const parentTag = parent?.tagName.toLowerCase() || "";
+    const isSafeTag = ["button", "a", "label", "option", "h1", "h2", "h3"].includes(parentTag);
+
+    if (text.length > 100 && !isSafeTag) {
+      text = text.substring(0, 100) + "... [TRUNCATED]";
+    }
+    return text + " ";
   }
 
   if (node.nodeType !== Node.ELEMENT_NODE) return "";

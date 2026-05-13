@@ -28,8 +28,8 @@ function Popup() {
 
   // Streaming & Token State
   const [totalTokens, setTotalTokens] = useState(0);
-  const portRef = useRef<chrome.runtime.Port | null>(null);
-  const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [sessionCost, setSessionCost] = useState(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const scrollRef         = useRef<HTMLDivElement>(null);
   const shouldStopRef     = useRef(false);
@@ -92,15 +92,7 @@ function Popup() {
     confirmResolveRef.current?.(false);
     confirmResolveRef.current = null;
     setPendingPlan(null);
-
-    if (portRef.current) {
-      portRef.current.postMessage({ action: "STOP" });
-      portRef.current.disconnect();
-      portRef.current = null;
-    }
-    if (pingIntervalRef.current) {
-      clearInterval(pingIntervalRef.current);
-    }
+    abortControllerRef.current?.abort();
   };
 
   const awaitConfirmation = (plan: PendingPlan): Promise<boolean> =>
@@ -130,6 +122,7 @@ function Popup() {
 
   const waitForStable = (tabId: number, timeoutMs = 5000): Promise<void> =>
     new Promise((resolve) => {
+      if (shouldStopRef.current) return resolve();
       chrome.tabs.sendMessage(tabId, { action: "WAIT_FOR_STABLE", payload: { timeout: timeoutMs } }, () => {
         if (chrome.runtime.lastError) {
           // Content script might be dead due to page navigation, fallback to a brief sleep
@@ -145,6 +138,8 @@ function Popup() {
 
     setIsRunning(true);
     setLogs([]);
+    setTotalTokens(0);
+    setSessionCost(0);
     shouldStopRef.current = false;
     setActiveTab('main'); // Switch to main tab when running
 
@@ -172,8 +167,39 @@ function Popup() {
 
       stepCount++;
       addLog(`──── STEP ${stepCount} ────`, 'step');
+
+      // 1. QUICK CONTEXT CHECK (COST SAVING)
+      addLog("Checking goal status...", 'system');
+      const contextRes = await new Promise<any>((resolve) => {
+        chrome.tabs.sendMessage(tab.id!, { action: "GET_PAGE_CONTEXT" }, (res) => {
+          if (chrome.runtime.lastError) resolve({ status: "error", message: chrome.runtime.lastError.message });
+          else resolve(res);
+        });
+      });
+
+      if (contextRes?.status === "success") {
+        const { pageContext } = contextRes;
+        try {
+          const qcResponse = await fetch("http://localhost:3000/api/quickcheck", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt, pageContext, history: localHistory })
+          });
+          const quickCheck = await qcResponse.json();
+          if (quickCheck.goalMet) {
+            addLog("Goal detected from page context — no scan needed.", 'success');
+            isCompleted = true;
+            break;
+          }
+        } catch (e) {
+          console.warn("Quick check failed, proceeding to full scan", e);
+        }
+      }
+
+      if (shouldStopRef.current) { addLog("STOPPED.", 'warn'); break; }
+
+      // 2. FULL DOM SCAN (ONLY IF NEEDED)
       addLog("Scanning DOM...", 'system');
-      
       const scanRes = await new Promise<any>((resolve) => {
         chrome.tabs.sendMessage(tab.id!, { action: "SCAN_PAGE" }, (res) => {
           if (chrome.runtime.lastError) resolve({ status: "error", message: chrome.runtime.lastError.message });
@@ -195,65 +221,87 @@ function Popup() {
       let currentThought = "";
       addLog("AI is thinking...", 'thought');
 
-      const aiRes = await new Promise<any>((resolve) => {
-        const port = chrome.runtime.connect({ name: "plan-stream" });
-        portRef.current = port;
+      abortControllerRef.current = new AbortController();
 
-        // Periodic heartbeat to keep service worker alive during long generation
-        pingIntervalRef.current = setInterval(() => {
-          port.postMessage({ action: "PING" });
-        }, 10000);
+      const aiRes = await (async () => {
+        try {
+          const response = await fetch("http://localhost:3000/api/plan/stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              prompt, domHtml, history: localHistory,
+              pageContext, persona, vaultFile: cvName
+            }),
+            signal: abortControllerRef.current!.signal
+          });
 
-        let finalPlan: any = null;
+          if (!response.body) throw new Error("No response body");
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder("utf-8");
+          let buffer = "";
+          let finalPlan: any = null;
 
-        port.onMessage.addListener((msg) => {
-          if (msg.type === "thought") {
-            currentThought += msg.data;
-            setLogs(prev => {
-              const next = [...prev];
-              const lastIdx = next.length - 1;
-              if (lastIdx >= 0 && next[lastIdx].type === 'thought') {
-                next[lastIdx] = { ...next[lastIdx], message: "AI: " + currentThought };
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            let newlineIdx;
+            while ((newlineIdx = buffer.indexOf('\n\n')) !== -1) {
+              const chunk = buffer.slice(0, newlineIdx);
+              buffer = buffer.slice(newlineIdx + 2);
+
+              if (chunk.startsWith('data: ')) {
+                try {
+                  const msg = JSON.parse(chunk.slice(6));
+
+                  if (msg.type === "thought") {
+                    currentThought += msg.data;
+                    setLogs(prev => {
+                      const next = [...prev];
+                      const lastIdx = next.length - 1;
+                      if (lastIdx >= 0 && next[lastIdx].type === 'thought') {
+                        next[lastIdx] = { ...next[lastIdx], message: "AI: " + currentThought };
+                      }
+                      return next;
+                    });
+                    requestAnimationFrame(() => {
+                      if (scrollRef.current)
+                        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+                    });
+                  } else if (msg.type === "usage") {
+                    if (msg.data.total_tokens) {
+                      setTotalTokens(prev => prev + msg.data.total_tokens);
+                      const inputCost  = (msg.data.prompt_tokens     / 1_000_000) * 5;
+                      const outputCost = (msg.data.completion_tokens / 1_000_000) * 15;
+                      setSessionCost(prev => prev + inputCost + outputCost);
+                    }
+                  } else if (msg.type === "plan") {
+                    finalPlan = msg.data;
+                  } else if (msg.type === "error") {
+                    return { status: "error", message: msg.data };
+                  }
+                } catch (e) { /* malformed chunk, skip */ }
               }
-              return next;
-            });
-            requestAnimationFrame(() => {
-              if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-            });
-          } else if (msg.type === "usage") {
-            if (msg.data.total_tokens) {
-              setTotalTokens(prev => prev + msg.data.total_tokens);
             }
-          } else if (msg.type === "plan") {
-            finalPlan = msg.data;
-          } else if (msg.type === "error") {
-            resolve({ status: "error", message: msg.data });
-            port.disconnect();
-          } else if (msg.type === "done") {
-            resolve({ status: "success", plan: finalPlan });
-            port.disconnect();
           }
-        });
 
-        port.onDisconnect.addListener(() => {
-          if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
-          if (!finalPlan && !shouldStopRef.current) {
-            resolve({ status: "error", message: "Port disconnected before plan completed." });
-          }
-        });
+          return finalPlan
+            ? { status: "success", plan: finalPlan }
+            : { status: "error", message: "Stream ended without a plan." };
 
-        port.postMessage({
-          action: "START_PLAN",
-          payload: { prompt, domHtml, history: localHistory, pageContext, persona, vaultFile: cvName }
-        });
-      });
+        } catch (err: any) {
+          if (err.name === "AbortError") return { status: "error", message: "Stopped by user." };
+          return { status: "error", message: err.message };
+        }
+      })();
 
       if (!aiRes || aiRes.status !== "success") {
         addLog(`AI_PLAN_FAILED: ${aiRes?.message}`, 'error');
         break;
       }
 
-      const { actions, taskCompleted } = aiRes.plan;
+      const { thought, actions, taskCompleted } = aiRes.plan;
 
       if (taskCompleted && actions.length === 0) {
         addLog("Goal detected — no further actions needed.", 'success');
@@ -359,7 +407,7 @@ function Popup() {
         <div className="terminal-title">AI_AGENT_SHELL_V1.0</div>
         
         <div className={`token-counter ${totalTokens > 50000 ? 'warning' : ''}`} title="Session Tokens">
-          Tokens: {(totalTokens / 1000).toFixed(1)}k | Cost: ${((totalTokens / 1000000) * 10).toFixed(3)}
+          Tokens: {(totalTokens / 1000).toFixed(1)}k | Cost: ${sessionCost.toFixed(3)}
         </div>
 
         {isRunning && (

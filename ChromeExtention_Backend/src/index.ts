@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { getAiPlan } from './aiService';
+import { getAiPlanStream, getQuickCheck } from './aiService';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -18,28 +18,16 @@ app.get('/', (req, res) => {
   res.send('AI Agent Backend is running!');
 });
 
-// The main endpoint for your Chrome extension
-app.post('/api/plan', async (req, res) => {
+app.post('/api/quickcheck', async (req, res) => {
+  const { prompt, pageContext, history } = req.body;
   try {
-    const { prompt, domHtml, history, pageContext, persona, vaultFile } = req.body;
-
-    if (!prompt || !domHtml) {
-      return res.status(400).json({ error: "Missing 'prompt' or 'domHtml' in request body." });
-    }
-
-    // Call the AI service, passing the history (or an empty array if none is provided)
-    const plan = await getAiPlan(prompt, domHtml, history || [], pageContext, persona, vaultFile);
-    
-    // Send the plan back to the Chrome extension
-    res.json({ status: "success", plan });
-
+    const result = await getQuickCheck(prompt, pageContext, history || []);
+    res.json(result);
   } catch (error: any) {
-    console.error("Error getting AI plan:", error.message);
-    res.status(500).json({ status: "error", message: error.message });
+    console.error("Quick check failed:", error.message);
+    res.json({ goalMet: false }); // Fallback to full scan
   }
 });
-
-import { getAiPlanStream } from './aiService';
 
 app.post('/api/plan/stream', async (req, res) => {
   const { prompt, domHtml, history, pageContext, persona, vaultFile } = req.body;
@@ -49,14 +37,14 @@ app.post('/api/plan/stream', async (req, res) => {
     return;
   }
 
-  // Set headers for JSONL
-  res.setHeader('Content-Type', 'application/json');
+  // Set headers for SSE
+  res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
   const abortController = new AbortController();
 
-  req.on('close', () => {
+  res.on('close', () => {
     console.log("Client disconnected, aborting OpenAI request...");
     abortController.abort();
   });
@@ -66,10 +54,13 @@ app.post('/api/plan/stream', async (req, res) => {
   } catch (error: any) {
     if (error.name === 'AbortError') {
       console.log('Stream aborted successfully.');
+      if (!res.writableEnded) res.end();
     } else {
       console.error("Error streaming AI plan:", error.message);
-      res.write(`event: error\ndata: ${JSON.stringify(error.message)}\n\n`);
-      res.end();
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ type: "error", data: error.message })}\n\n`);
+        res.end();
+      }
     }
   }
 });
