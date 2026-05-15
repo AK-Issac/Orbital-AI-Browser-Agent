@@ -11,8 +11,6 @@
 
 Type what you want. The agent reads the live page, reasons about it, plans a sequence of actions, and executes — click by click, field by field — until the goal is met. No Selenium. No hand-written selectors. No scripting. Natural language workflows powered by semantic DOM understanding and structured browser automation.
 
-![Demo](./demo.gif)
-*60-second walkthrough: searching Google, filling a multi-field form, and auto-uploading a CV to a job application.*
 
 ---
 
