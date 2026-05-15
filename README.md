@@ -49,7 +49,7 @@ Type what you want. The agent reads the live page, reasons about it, plans a seq
 **Data flow per agent step:**
 
 ```
-Popup → GET_PAGE_CONTEXT → QuickCheck API → (if needed) SCAN_PAGE → Stream Plan API → EXECUTE_ACTION → repeat
+Side Panel → Port Message → Background (Agent Loop) → QuickCheck API → (if needed) SCAN_PAGE → Stream Plan API → EXECUTE_ACTION → repeat
 ```
 
 ---
@@ -87,23 +87,16 @@ If the page title alone satisfies the goal (e.g., landing on *"Indian Chicken Cu
 
 ---
 
-### 3. Streaming Architecture: Direct Popup → SSE → OpenAI
+### 3. Persistent Architecture: Side Panel & Background Loop
 
-The agent streams GPT-4o's reasoning in real time using **Server-Sent Events (SSE)**. The popup connects directly to the Express backend — intentionally bypassing the Chrome service worker.
+The agent uses a persistent **Side Panel** connection to a **Background Service Worker**.
 
-**The MV3 problem**: Chrome Manifest V3 service workers are designed for short-lived event handlers, not long-held HTTP connections. A streaming `fetch` inside an `onMessage` async handler gets killed mid-stream as the worker goes dormant. Critically, `req.on('close')` on the Node side fires the moment the POST body is consumed — not when the SSE client actually disconnects — causing the `AbortController` to abort the OpenAI request before any tokens stream back.
+**The MV3 problem**: Chrome Manifest V3 service workers are designed for short-lived event handlers. In an ephemeral popup architecture, the agent loop dies the moment the user clicks away from the extension.
 
-**The fix**: The popup is a real browser window with no lifetime constraints. It fetches directly to `localhost:3000`, holds the SSE connection open, and reads chunks via a streaming `ReadableStream` reader. The service worker is retained only for `chrome.tabs.sendMessage` calls, where short-lived handlers are the correct model.
-
-**SSE event protocol:**
-```
-data: { type: "thought", data: "I can see a search bar on this page..." }
-data: { type: "usage",   data: { prompt_tokens: 8420, completion_tokens: 180 } }
-data: { type: "plan",    data: { thought, taskCompleted, actions[] } }
-data: { type: "error",   data: "Failed to parse AI plan." }
-```
-
-Thought tokens stream character-by-character using an incremental regex (`/"thought"\s*:\s*"((?:[^"\\]|\\.)*)/`) that correctly handles mid-stream JSON escape sequences — the user watches the AI reason in real time rather than waiting 5–8 seconds for a silent black-box response.
+**The fix**: Orbital uses the `chrome.sidePanel` API combined with a persistent `runtime.Port` connection to the background script.
+1. **Persistent UI**: The side panel stays open as you navigate between tabs, providing a continuous view of the agent's progress.
+2. **Background State**: The agent loop and session state are managed in `background/index.ts`. This ensures that even if the side panel is closed and reopened, the mission continues uninterrupted.
+3. **SSE via Background**: The background service worker handles the streaming connection to the Express backend, broadcasting character-by-character "thoughts" to all connected side panel instances.
 
 ---
 
@@ -161,7 +154,7 @@ History is capped at 10 entries via a `shift()` rolling window. Older entries ar
 ## Agent Loop Deep Dive
 
 ```
-runAgent()
+runAgent() (Background)
   │
   ├── GET_PAGE_CONTEXT (free — no AI call)
   │
@@ -172,8 +165,8 @@ runAgent()
   ├── SCAN_PAGE (content script, CPU only — no API call)
   │
   ├── POST /api/plan/stream (gpt-4o, SSE)
-  │     ├── streams thought tokens  → displayed character-by-character
-  │     ├── emits usage event       → token + cost counter updated live
+  │     ├── streams thought tokens  → broadcast to Side Panel
+  │     ├── emits usage event       → updated in Background State
   │     └── emits plan event        → { thought, taskCompleted, actions[] }
   │
   ├── [SEMI-AUTO MODE] awaitConfirmation()
@@ -213,8 +206,6 @@ runAgent()
 
 **Average cost per completed task:** —
 
-> *Benchmarks collected manually across real websites. Results vary with page complexity, DOM structure, and site-specific rendering behavior.*
-
 ---
 
 ## Cost Optimization Strategy
@@ -227,39 +218,35 @@ runAgent()
 | Rolling history window | `shift()` at 10 entries | Prevents context overflow in long sessions |
 | Accurate cost metering | Separate input/output pricing ($5 / $15 per 1M tokens) | Correct display vs. blended-rate overestimation |
 
-**Observed costs per task type:**
-- Simple search + navigation: ~$0.05–0.10
-- Multi-field form fill: ~$0.08–0.15
-- CV drop (navigate + upload): ~$0.10–0.20
-
 ---
 
 ## Known Limitations
 
-Orbital is designed for reliability on structured, predictable workflows — not unrestricted open-ended browsing. Understanding where it performs well matters as much as understanding what it can do.
+Orbital is designed for reliability on structured, predictable workflows — not unrestricted open-ended browsing.
 
-- **Canvas and WebGL interfaces**: Pages that render primarily via `<canvas>` (Figma, Google Maps, some dashboards) have no accessible DOM tree. The agent cannot target elements that don't exist in HTML
-- **Heavy React re-renders**: Aggressive client-side re-renders can invalidate `data-agent-id` assignments mid-step. The agent detects and recovers from missing elements, but SPAs with rapid state mutations may require multiple retries
-- **Authentication walls**: The agent operates on visible page state only. OAuth flows, CAPTCHAs, and 2FA checkpoints require manual user intervention at the blocked step
-- **Ambiguous goals**: Vague instructions (*"do something useful here"*) produce unpredictable results. The agent performs best when the goal is specific and has a clear, verifiable completion state
-- **Continuously animated pages**: Live feeds and auto-refreshing dashboards may interfere with the 500ms mutation idle detector in `waitForPageStable()`, causing premature or delayed step transitions
-- **Long sessions on content-heavy pages**: DOM snapshots near the 80k character limit accumulate significant token cost. Sessions exceeding ~10 steps on large pages may see increased cost and gradually degraded reasoning
+- **Canvas and WebGL interfaces**: Pages that render primarily via `<canvas>` have no accessible DOM tree.
+- **Heavy React re-renders**: Aggressive client-side re-renders can invalidate `data-agent-id` assignments mid-step.
+- **Authentication walls**: The agent operates on visible page state only. OAuth/CAPTCHAs require manual intervention.
+- **Ambiguous goals**: Vague instructions produce unpredictable results.
+- **Continuously animated pages**: Live feeds may interfere with mutation detection.
 
 ---
 
 ## Key Features
 
-**Semi-Auto & Full-Auto Modes** — Semi-Auto pauses before every action batch, showing the AI's full reasoning and planned actions for user review and approval. Full-Auto executes without interruption. Semi-Auto is the recommended mode for new workflows or sensitive pages.
+**Side Panel Interface** — The agent now lives in a persistent side panel that stays open as you browse. No more clicking the extension icon every time you change tabs.
 
-**Real-Time Thought Streaming** — The AI's reasoning streams character-by-character as tokens generate. The user sees *why* each decision is made — transparency over black-box execution. Built on SSE with incremental JSON extraction.
+**Persistent Agent Loop** — State and execution are managed in the background service worker. Close the side panel or switch tabs; the agent keeps working until the goal is met.
 
-**Persona Engine** — Store personal data (name, email, phone, LinkedIn, address) once in the Settings tab. When the agent encounters any form, it maps fields intelligently using surrounding HTML context and label analysis — not blind sequential filling.
+**Semi-Auto & Full-Auto Modes** — Semi-Auto pauses before every action batch for user approval. Full-Auto executes without interruption.
 
-**File Vault** — Upload a CV or document once (PDF/DOC, max 10MB), stored locally as base64 in `chrome.storage.local`. On any file upload input, the agent reconstructs and injects the file programmatically.
+**Real-Time Thought Streaming** — Watch the AI's reasoning character-by-character as tokens generate.
 
-**Session Cost Counter** — Live token count and dollar cost in the header, updated per-step with separate input ($5/1M) and output ($15/1M) pricing. Shifts to a warning state at 50k tokens.
+**Persona Engine** — Store personal data once; the agent maps fields intelligently using context analysis.
 
-**Graceful Cancellation** — `AbortController` propagates from popup fetch → Express `res.on('close')` → OpenAI streaming request. STOP cleanly cancels the entire chain with no dangling connections or background token spend.
+**File Vault** — Securely store a CV/document locally (base64) for automated job application uploads.
+
+**Graceful Cancellation** — `AbortController` propagation ensures that clicking STOP cleanly cancels the entire AI streaming chain.
 
 ---
 
@@ -267,19 +254,17 @@ Orbital is designed for reliability on structured, predictable workflows — not
 
 | Category | Technology |
 |---|---|
-| **Chrome Extension** | Manifest V3, TypeScript |
-| **Frontend** | React, Vite, CSS |
+| **Chrome Extension** | Manifest V3, TypeScript, Side Panel API |
+| **Frontend** | React, Vite, Vanilla CSS |
 | **Backend** | Node.js, Express, TypeScript |
-| **AI — Planning** | OpenAI GPT-4o (streaming, structured JSON output) |
-| **AI — Goal Check** | OpenAI GPT-4o-mini (sync, binary classification) |
+| **AI — Planning** | OpenAI GPT-4o (streaming) |
+| **AI — Goal Check** | OpenAI GPT-4o-mini (sync) |
 | **Streaming Protocol** | Server-Sent Events (SSE) |
-| **Local Storage** | chrome.storage.local (persona + CV vault) |
+| **Local Storage** | chrome.storage.local |
 
 ---
 
 ## Local Setup
-
-**Prerequisites:** Node.js 18+, OpenAI API key, Chrome
 
 **1. Clone the repository**
 ```bash
@@ -295,7 +280,6 @@ npm install
 # OPENAI_API_KEY=sk-...
 npm run dev
 ```
-Server runs on `http://localhost:3000`.
 
 **3. Build the extension**
 ```bash
@@ -306,17 +290,9 @@ npm run build
 
 **4. Load in Chrome**
 - Go to `chrome://extensions`
-- Enable **Developer Mode** (toggle, top right)
+- Enable **Developer Mode**
 - Click **Load unpacked**
 - Select the `ChromeExtention/dist` folder
-
-**5. Set up your persona** *(recommended)*
-
-Open Orbital → **SETTINGS** tab → enter personal details → optionally upload a CV.
-
-**6. Run your first mission**
-
-Navigate to any website, open Orbital, type a goal, and press **RUN_MISSION**.
 
 ---
 
@@ -327,22 +303,24 @@ orbital-agent/
 │
 ├── ChromeExtention/                    # Chrome Extension (React + Vite)
 │   ├── src/
-│   │   ├── popup/
-│   │   │   ├── Popup.tsx               # Agent loop, SSE stream reader, UI state
-│   │   │   └── Popup.css
+│   │   ├── sidepanel/
+│   │   │   ├── SidePanel.tsx           # Persistent UI, Port listener
+│   │   │   ├── SidePanel.css           # Terminal aesthetics
+│   │   │   └── main.tsx                # React entry point
 │   │   ├── content/
-│   │   │   └── index.ts               # DOM scanner, action executor, stability detection
+│   │   │   └── index.ts                # DOM scanner, action executor
 │   │   ├── background/
-│   │   │   └── index.ts               # MV3 service worker — lightweight message relay
+│   │   │   └── index.ts                # Agent loop, state manager, API fetcher
 │   │   └── types/
-│   │       └── index.ts               # Shared TypeScript interfaces
-│   ├── manifest.json
+│   │       └── index.ts                # Shared TypeScript interfaces
+│   ├── sidepanel.html                  # Side Panel HTML entry
+│   ├── manifest.json                   # Extension manifest (MV3)
 │   └── vite.config.ts
 │
 └── ChromeExtention_Backend/            # Node.js + Express Backend
     ├── src/
-    │   ├── index.ts                    # Express routes, SSE setup, AbortController wiring
-    │   ├── aiService.ts                # GPT-4o streaming, quickcheck, prompt builder
-    │   └── types.ts                    # ActionPlan, DOMElement, Action interfaces
+    │   ├── index.ts                    # SSE routes, AbortController wiring
+    │   ├── aiService.ts                # GPT-4o streaming, prompt builder
+    │   └── types.ts                    # ActionPlan, DOMElement interfaces
     └── .env                            # OPENAI_API_KEY
 ```
