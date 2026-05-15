@@ -183,8 +183,8 @@ chrome.runtime.onMessage.addListener((
         }
 
         try {
-          const base64Data = result.cvBase64;
-          const filename = result.cvName;
+          const base64Data = result.cvBase64 as string;
+          const filename = result.cvName as string;
 
           // Convert Base64 to File object
           const arr = base64Data.split(',');

@@ -3,8 +3,8 @@
   "name": "Browser Workflow Agent",
   "version": "1.0.0",
   "description": "AI browser workflow assistant",
-  "action": {
-    "default_popup": "index.html"
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "background": {
     "service_worker": "src/background/index.ts",
@@ -20,7 +20,8 @@
     "activeTab",
     "scripting",
     "storage",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "sidePanel"
   ],
   "host_permissions": [
     "http://localhost:3000/*"

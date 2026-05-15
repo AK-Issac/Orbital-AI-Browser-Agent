@@ -12,21 +12,30 @@
   --terminal-blue: #00d2ff;
 }
 
-body { margin: 0; padding: 0; background-color: transparent; }
+* {
+  box-sizing: border-box;
+}
+
+html, body { 
+  margin: 0; 
+  padding: 0; 
+  height: 100%;
+  background-color: var(--terminal-bg); 
+  overflow: hidden;
+}
 
 /* ─────────────────────────────────────────────
-   Container
+   Container (fills side panel)
 ───────────────────────────────────────────── */
 .terminal-container {
-  width: 420px;
+  width: 100%;
+  min-height: 100vh;
   background-color: var(--terminal-bg);
   color: var(--terminal-green);
   font-family: var(--terminal-font);
-  border: 1px solid var(--terminal-border);
-  border-radius: 8px;
-  overflow: hidden;
-  box-shadow: 0 10px 30px rgba(0,0,0,.5);
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 /* CRT scanline */
@@ -68,6 +77,17 @@ body { margin: 0; padding: 0; background-color: transparent; }
   letter-spacing: 1px;
   font-weight: 500;
   flex: 1;
+}
+
+.token-counter {
+  font-size: 10px;
+  color: var(--terminal-green-dim);
+  margin-left: 10px;
+  white-space: nowrap;
+}
+.token-counter.warning {
+  color: var(--terminal-warn);
+  text-shadow: 0 0 5px rgba(255,189,46,.3);
 }
 
 .stop-button {
