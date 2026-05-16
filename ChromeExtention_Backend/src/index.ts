@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { getAiPlanStream, getQuickCheck } from './aiService';
+import { getAiPlanStream, getNavigationDecision } from './aiService';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -18,14 +18,15 @@ app.get('/', (req, res) => {
   res.send('AI Agent Backend is running!');
 });
 
-app.post('/api/quickcheck', async (req, res) => {
+app.post('/api/navcheck', async (req, res) => {
   const { prompt, pageContext, history } = req.body;
   try {
-    const result = await getQuickCheck(prompt, pageContext, history || []);
+    const result = await getNavigationDecision(prompt, pageContext, history || []);
     res.json(result);
   } catch (error: any) {
-    console.error("Quick check failed:", error.message);
-    res.json({ goalMet: false }); // Fallback to full scan
+    console.error("Navigation decision failed:", error.message);
+    // Safe fallback: treat as correct domain, proceed to full scan
+    res.json({ goalMet: false, correctDomain: true, suggestedUrl: null });
   }
 });
 

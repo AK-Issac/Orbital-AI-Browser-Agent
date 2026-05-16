@@ -224,8 +224,8 @@ async function runAgent() {
     state.stepCount = stepCount;
     addLog(`──── STEP ${stepCount} ────`, 'step');
 
-    // 1. Quick Context Check
-    addLog('Checking goal status...', 'system');
+    // 1. Navigation Decision (gpt-4o-mini, ~$0.0001 — cheapest call, highest ROI)
+    addLog('Evaluating navigation...', 'system');
     const contextRes = await new Promise<any>((resolve) => {
       chrome.tabs.sendMessage(tab.id!, { action: 'GET_PAGE_CONTEXT' }, (res) => {
         if (chrome.runtime.lastError) resolve({ status: 'error', message: chrome.runtime.lastError.message });
@@ -236,19 +236,35 @@ async function runAgent() {
     if (contextRes?.status === 'success') {
       const { pageContext } = contextRes;
       try {
-        const qcResponse = await fetch('http://localhost:3000/api/quickcheck', {
+        const navResponse = await fetch('http://localhost:3000/api/navcheck', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prompt: state.prompt, pageContext, history: state.history }),
         });
-        const quickCheck = await qcResponse.json();
-        if (quickCheck.goalMet) {
-          addLog('Goal detected from page context — no scan needed.', 'success');
+        const nav = await navResponse.json();
+
+        if (nav.goalMet) {
+          addLog('Goal already satisfied — mission complete.', 'success');
           isCompleted = true;
           break;
         }
+
+        if (!nav.correctDomain && nav.suggestedUrl) {
+          const target = nav.suggestedUrl;
+          addLog(`Wrong domain — navigating to ${target}`, 'warn');
+          state.history.push(`[STEP ${stepCount}] Wrong domain detected. Navigating to ${target}.`);
+          await new Promise<void>((resolve) => {
+            chrome.tabs.sendMessage(tab.id!, { action: 'NAVIGATE', payload: { url: target } }, () => resolve());
+          });
+          await waitForStable(tab.id!, 5000);
+          // Skip to next loop iteration — re-evaluate after navigation
+          continue;
+        }
+
+        // correctDomain: true → fall through to DOM scan
+        addLog('On correct domain — scanning page...', 'system');
       } catch (e) {
-        console.warn('Quick check failed, proceeding to full scan', e);
+        console.warn('Nav check failed, proceeding to full scan', e);
       }
     }
 

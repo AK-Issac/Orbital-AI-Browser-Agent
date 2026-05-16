@@ -105,6 +105,17 @@ chrome.runtime.onMessage.addListener((
     return true; // Asynchronous
   }
 
+  else if (request.action === "NAVIGATE") {
+    const { url } = request.payload;
+    if (url && url.startsWith('http')) {
+      window.location.href = url;
+      sendResponse({ status: "success" });
+    } else {
+      sendResponse({ status: "error", message: `Invalid navigation URL: ${url}` });
+    }
+    return false; // Synchronous
+  }
+
   else if (request.action === "EXECUTE_ACTION") {
     const { actionType, targetId, value } = request.payload;
     const element = document.querySelector(`[data-agent-id="${targetId}"]`) as HTMLElement;
@@ -212,6 +223,17 @@ chrome.runtime.onMessage.addListener((
         }
       });
       return true; // Keep message channel open for async chrome.storage response
+    }
+
+    else if (actionType === "navigate") {
+      const url = value;
+      if (url && url.startsWith('http')) {
+        window.location.href = url;
+        sendResponse({ status: "success", success: true, message: `Navigating to ${url}` });
+      } else {
+        sendResponse({ status: "error", success: false, message: `Invalid URL for navigate action: ${url}` });
+      }
+      return false; // Synchronous
     }
 
     else {

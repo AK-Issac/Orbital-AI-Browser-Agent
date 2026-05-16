@@ -105,7 +105,7 @@ export async function getAiPlanStream(
                 items: {
                   type: "object",
                   properties: {
-                    actionType: { type: "string", enum: ["click", "type", "upload"] },
+                    actionType: { type: "string", enum: ["click", "type", "upload", "navigate"] },
                     targetId:   { type: "string" },
                     value:      { type: ["string", "null"] }
                   },
@@ -213,23 +213,36 @@ export async function getAiPlanStream(
   res.end();
 }
 
-export async function getQuickCheck(
+export interface NavigationDecision {
+  goalMet: boolean;
+  correctDomain: boolean;
+  suggestedUrl: string | null;
+}
+
+export async function getNavigationDecision(
   userPrompt: string,
   pageContext: PageContext,
   history: string[]
-): Promise<{ goalMet: boolean }> {
+): Promise<NavigationDecision> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OpenAI API Key is missing in backend.");
 
-  const systemPrompt = `You are a goal verification assistant.
-Your only job is to decide if the user's goal has ALREADY been satisfied based on the CURRENT URL and PAGE TITLE.
+  const systemPrompt = `You are a navigation decision engine for a browser automation agent.
+Given the user's goal, the current page URL and title, and prior history, you must decide:
 
-USER GOAL: ${userPrompt}
-PAST HISTORY: ${history.join(' -> ') || 'None'}
+1. goalMet — Has the goal ALREADY been fully satisfied by the current page?
+2. correctDomain — Is this the correct website/domain to accomplish this goal?
+3. suggestedUrl — If correctDomain is false, what is the best starting URL to navigate to? Return null if correctDomain is true.
 
-Return a JSON object: { "goalMet": boolean }
-If the page title or URL suggests the user is looking at the final result they wanted (e.g. they wanted a recipe and they are on a recipe page), return goalMet: true.
-Otherwise return goalMet: false.`;
+Rules:
+- If goalMet is true, correctDomain must also be true.
+- For tasks like "apply to jobs on LinkedIn", the correct domain is linkedin.com.
+- For tasks like "search for X", if no specific site is mentioned, suggest "https://www.google.com".
+- If the user is already on the correct site category (e.g. any job board for job tasks), set correctDomain: true.
+- When uncertain about the correct site, set correctDomain: true and suggestedUrl: null to avoid unnecessary redirects.
+- suggestedUrl must be a full URL starting with https:// or null.
+
+Return ONLY a JSON object: { "goalMet": boolean, "correctDomain": boolean, "suggestedUrl": string | null }`;
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -241,7 +254,7 @@ Otherwise return goalMet: false.`;
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `URL: ${pageContext.url}\nTitle: ${pageContext.title}` }
+        { role: "user", content: `USER GOAL: ${userPrompt}\nCURRENT URL: ${pageContext.url}\nCURRENT TITLE: ${pageContext.title}\nHISTORY: ${history.join(' -> ') || 'None (step 1)'}` }
       ],
       response_format: { type: "json_object" }
     })
@@ -249,5 +262,11 @@ Otherwise return goalMet: false.`;
 
   const data = await response.json() as any;
   if (data.error) throw new Error(data.error.message);
-  return JSON.parse(data.choices[0].message.content);
+
+  const result = JSON.parse(data.choices[0].message.content) as NavigationDecision;
+  // Sanitise — ensure suggestedUrl is a real URL or null
+  if (result.suggestedUrl && !result.suggestedUrl.startsWith('http')) {
+    result.suggestedUrl = null;
+  }
+  return result;
 }
